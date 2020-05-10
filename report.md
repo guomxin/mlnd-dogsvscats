@@ -50,6 +50,10 @@ $$ LogLoss = -\frac{1}{n}\sum_{i=1}^n [y_ilog(\hat{y}_i)+(1-y_i)log(1- \hat{y}_i
 ![](media/test_error.jpg)
 在测试集中同样会有些效果比较差。如`126.jpg`，没有动物的面部图像，很难直接从照片中看出是猫还是狗，`5292.jpg`和`7999.jpg`都是有网格阻挡，而`5302.jpg`照片中会有一些多余的文字信息。这些会对图像分类器形成一定的挑战。
 
+训练集上图片尺寸分布的散点图如下（横轴为宽度，纵轴为高度）：
+![](media/img_scatter_plot.png)
+可以发现图片尺寸分布不一，训练模型时需要进行resize。
+
 数据集中 `data/train/`里的猫狗图片没有分类，放在一个文件夹，需要将训练照片按照类别文件夹分类，猫和狗的图片放在不同的文件夹中。`train` 里面包含两个文件夹，一个是cat，一个是dog。
 ``` python 
 ├── data
@@ -149,29 +153,57 @@ Xception结构是将ResNet的相关卷积变成了depthwise separable conv，如
 - 标准化，将RGB像素值缩放在0到1的范围内（含0和1）
 
 ### 3.2 执行过程
-主要包含以下几个步骤:
-- 构建Xception神经网络
-    * 导入没有top层的神经网络模型
-    * 添加全连接层到Xception
-    * 编译模型
-- 训练数据
-- 保存最佳模型
-- 使用最佳模型进行数据预测
-
 使用了Keras进行建模和预测，后端是基于TensorFlow的。Keras是一个高层神经网络API，Keras由纯Python编写而成并基于Tensorflow、Theano以及CNTK后端。Keras 为支持快速实验而生，有比较好的特性：
 - 简易和快速的原型设计（keras具有高度模块化，极简，和可扩充特性）
 - 支持CNN和RNN，或二者的结合
 - 无缝CPU和GPU切换
 
-keras.applications.xception.Xception就是本次实验需要使用的预训练模型。这个没有top层的预训练模型是经过了ImageNet的训练，我们需要在实验之前下载好需要模型文件。使用经过了预处理的从Kaggle下载的数据进行了模型的训练，损失函数使用的是交叉熵cross-entropy，并且使用了adadelta,adam,sgd三种优化器对模型进行了训练（具体代码在train_model.py中），并且使用了最佳的模型进行预测。使用了dropout=0.3来防止模型过拟合。具体请见`猫狗大战.ipynb`的`2 执行过程`部分。
+主要包含以下几个步骤:
+- 构建Xception神经网络
+    * 导入没有top层的神经网络模型
+    * 为了防止过拟合，添加dropout层，参数设置为0.3
+    * 添加输出层
+      由于为二分类，选择单节点输出，激活函数为sigmoid
+    * 编译模型
+- 训练
+  optimizer选择adam, adadelta和sgd分别进行实验，从训练过程数据(请见`猫狗大战.html`)来看，这三种优化方法基本在第2轮就能收敛。从Kaggle的评测结果来看，adam效果较好，后续完善部分以adam进行实验。
+- 保存最佳模型
+- 使用最佳模型进行数据预测
+
+keras.applications.xception.Xception就是本次实验需要使用的预训练模型。这个没有top层的预训练模型是经过了ImageNet的训练，我们需要在实验之前下载好需要模型文件。使用经过了预处理的从Kaggle下载的数据进行了模型的训练，损失函数使用的是交叉熵cross-entropy，并且使用了adadelta,adam,sgd三种优化器对模型进行了训练，并且使用了最佳的模型进行预测。使用了dropout=0.3来防止模型过拟合。提交Kaggle测试结果如下：
+| 优化器 | 分数 |
+| --- | --- |
+|adadelta| 0.08204 |
+|adam| 0.06186 |
+|sgd| 0.09087 |
+另外在输出层之前加入一个中间层节点数为256，dropout=0.3，看增加模型的复杂度，会不会提升效果。如下：
+```python
+base_model = Xception(
+  input_tensor=Input((target_image_size[0], target_image_size[1], 3)),
+  weights='imagenet', include_top=False)
+# 冻结base_model中所有的层
+for layers in base_model.layers:
+    layers.trainable = False
+
+# 基于base_model定义模型
+x = GlobalAveragePooling2D()(base_model.output)
+x = Dropout(0.3)(x)
+x = Dense(256, activation='relu')(x)
+x = Dropout(0.3)(x)
+x = Dense(1, activation='sigmoid')(x)
+model = Model(base_model.input, x)
+```
+从验证集acc和loss来看，没有明显改善，提交Kaggle进行测试，得分为`0.06836`，没有变好。可能因为猫狗分类这种二分类问题比较简单，复杂的模型容易产生过拟合。
+
+具体请见`猫狗大战.ipynb`的`2 执行过程`部分。
 
 ### 4 完善
 经过以上方法多次尝试后结果如下（选取部分结果）:
 | 优化器 | 分数 |
 | --- | --- |
-|adadelta| 0.10474 |
-|adam| 0.09513 |
-|sgd| 0.11208 |
+|adadelta| 0.08204 |
+|adam| 0.06186 |
+|sgd| 0.09087 |
 经过多次且长时间探索尝试，训练出来的最佳模型预测的结果均不能满足`基准模型指标得分需要小于0.06127`的要求。经过网上调研分析，发现问题出在BN层，具体如下：
 - TF为后端时，BN有一个参数是training，控制归一化时用的是当前Batch的均值和方差（训练模式）还是移动均值和方差（测试模式），这个参数由Keras的K.learning_phase控制。但是只设置trainable是不会影响BN的training参数
 - 冻结时某一层时，我们希望这一层的状态和预训练模型中的状态一致
@@ -185,11 +217,11 @@ K.set_learning_phase(0)
 同时试验dropout为[0, 0.1, 0.2, 0.3]，用3.2中同样的步骤进行训练，并选择最优模型生成测试集结果提交给Kaggle进行打分，具体请见`猫狗大战.ipynb`的`3 完善`部分。结果如下：
 | dropout | 分数 |
 | --- | --- |
-|no| 0.04786 |
-|0.1| 0.04955 |
-|0.2| 0.04716 |
-|0.3| 0.04902 |
-都能满足要求，并且dropout为0.2时的模型最好，下面的部分以此模型进行分析。
+|no| 0.04552 |
+|0.1| **0.04375** |
+|0.2| 0.04459 |
+|0.3| 0.04520 |
+都能满足要求，并且dropout为0.1时的模型最好，下面的部分以此模型进行分析。
 
 ## 5 结果
 
@@ -209,7 +241,7 @@ K.set_learning_phase(0)
 | ![](media/val_acc_opt.png) | ![](media/val_loss_opt.png) |
 | 验证精度 | 验证损失 |
 从图中可以看到，使用优化后的方法相比优化前在验证集上的准确度高很多，10轮训练稳定在99.4%左右。可以看到在10轮的训练中，训练集上准确度在不断的增加，验证集上准确度相对稳定。优化有的方法效果较好，并且训练的轮数较少时就能达到不不错的效果。
-将生成的文件提交到Kaggle，得分为0.4716，满足了项目要求的kaggle比赛前10%的成绩的得分为不高于0.06127。
+将生成的文件提交到Kaggle，得分为0.04375，满足了项目要求的kaggle比赛前10%的成绩的得分为不高于0.06127。
 
 ### 5.2 合理性分析
 在Keras 2.1.3及之后，当BN层被设为trainable=False时，测试时使用的是预训练模型中的移动均值和方差，从而达到冻结的效果，但是训练时仍然使用当前Batch计算均值和方差进行归一化，这对于迁移学习来说有问题的。当Keras中BN层冻结时，在训练中会用mini batch的均值和方差统计值以执行归一化，更好的方式应该是使用预训练模型中的移动均值和方差。上面的实验也证明了这一点。
